@@ -1,0 +1,27 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Caches and logs
+.mypy_cache/
+.pytest_cache/
+*.log
+friday_log.txt
+hf_cache/
+.ollama_model_cache/
+
+# Large Model Files (Keep local, do not track in Git)
+kokoro-v1.0.onnx
+voices-v1.0.bin
+owner_voiceprint.npy
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Audio outputs / generated voice files / testing outputs
+*.wav
+*.mp3
