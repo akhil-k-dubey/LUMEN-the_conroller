@@ -127,6 +127,14 @@ class AgenticTaskLoop:
         returns unparseable output. Returns plan_failed=True so the caller
         can distinguish Q&A (empty plan) from Ollama failure.
         """
+        import os
+        import getpass
+        try:
+            username = getpass.getuser()
+        except Exception:
+            username = "User"
+        home_dir = os.path.expanduser("~")
+
         plan_prompt = (
             f"You are FRIDAY's task planner. Break this task into steps:\n"
             f"TASK: {task}\n\n"
@@ -176,6 +184,7 @@ class AgenticTaskLoop:
             f"- If the task needs no skills (pure Q&A), return an empty array []\n"
             f"- To navigate a browser to a URL, ALWAYS use open_url <url>, NEVER use type_text for URLs. type_text is only for typing into document/form fields.\n"
             f"- For browser interaction: open_app msedge → focus_window Edge → open_url <url> → type_text/click\n"
+            f"- IMPORTANT: The active Windows user is '{username}'. Do NOT hardcode placeholder paths like 'C:\\Users\\User' in skill arguments. Use the correct active user profile directory: '{home_dir}' or save relative to the current workspace directory.\n"
             f"Output ONLY the JSON array, nothing else."
         )
 
@@ -511,10 +520,12 @@ class AgenticTaskLoop:
                     step.status = STEP_SKIP
                     step.result = "Skipped by user."
                     results_so_far.append(step.result)
-                    self.speak_fn(f"Skipping step {step.index}.")
+                    # Muted intermediate speak to avoid latency
+                    self._log(f"Skipping step {step.index}.")
                     continue
             else:
-                self.speak_fn(f"Step {step.index}: {step.description}.")
+                # Muted intermediate speak to avoid latency
+                self._log(f"Step {step.index}: {step.description}.")
 
             # Capture pre-state for file oracle (mtime comparison)
             pre_state = state_oracle.capture_pre_state(step.skill, step.args)
@@ -540,9 +551,9 @@ class AgenticTaskLoop:
                     results_so_far.append(step.result)
                     self.print_fn(f"[agentic]   result: {step.result[:120]}")
                     if step.status == STEP_FAIL:
-                        self.speak_fn(f"Step {step.index} failed: could not run the code.")
+                        self._log(f"Step {step.index} failed: could not run the code.")
                     else:
-                        self.speak_fn(f"Step {step.index} done: code executed successfully.")
+                        self._log(f"Step {step.index} done: code executed successfully.")
                     break
 
                 self.print_fn(f"[agentic]   result: {step.result[:120]}")
@@ -553,14 +564,14 @@ class AgenticTaskLoop:
                 if verdict == "done":
                     step.status = STEP_OK
                     results_so_far.append(step.result)
-                    self.speak_fn(f"Step {step.index} done. Task complete.")
+                    self._log(f"Step {step.index} done. Task complete.")
                     early_done = True
                     break
                 elif verdict == STEP_OK:
                     step.status = STEP_OK
                     results_so_far.append(step.result)
                     brief = step.result[:80] if len(step.result) <= 80 else step.result[:77] + "..."
-                    self.speak_fn(f"Step {step.index} done: {brief}")
+                    self._log(f"Step {step.index} done: {brief}")
                     break
                 elif verdict.startswith("retry") and attempt < _MAX_STEP_RETRIES:
                     hint = verdict[6:] if ":" in verdict else ""
@@ -573,7 +584,7 @@ class AgenticTaskLoop:
                     step.status = STEP_FAIL
                     step.result = f"Failed: {reason}"
                     results_so_far.append(step.result)
-                    self.speak_fn(f"Step {step.index} failed: {reason[:60]}.")
+                    self._log(f"Step {step.index} failed: {reason[:60]}.")
                     break
 
             if early_done:
@@ -585,15 +596,14 @@ class AgenticTaskLoop:
                 consecutive_fails += 1
                 if step.skill in _ABORT_CHAIN_ON_FAIL:
                     self._log(f"Critical step failure: '{step.skill}' failed. Aborting the entire task chain.")
-                    self.speak_fn(f"Critical step failed: could not {step.skill.replace('_', ' ')}. Aborting the remaining steps.")
+                    self._log(f"Critical step failed: could not {step.skill.replace('_', ' ')}. Aborting the remaining steps.")
                     break
                 if consecutive_fails >= _MAX_CONSECUTIVE_FAILS:
                     self._log(
                         f"Aborting: {consecutive_fails} steps failed in a row"
                     )
-                    self.speak_fn(
-                        f"{consecutive_fails} steps failed in a row. "
-                        f"Stopping to avoid wasting time."
+                    self._log(
+                        f"{consecutive_fails} steps failed in a row. Stopping to avoid wasting time."
                     )
                     break
             else:

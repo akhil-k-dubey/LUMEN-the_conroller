@@ -318,7 +318,7 @@ else:
     all_ok = False
 
 recall_ret = skill_recall("meeting")
-if "Found matches" in recall_ret and "3 PM with Akhil" in recall_ret:
+if ("Stored Notes" in recall_ret or "Found matches" in recall_ret) and "3 PM with Akhil" in recall_ret:
     print(f"  [OK] skill_recall found match successfully: {recall_ret!r}")
 else:
     print(f"  [FAIL] skill_recall failed: {recall_ret!r}")
@@ -407,6 +407,43 @@ if "Restored previous item to clipboard" in paste_ret and "First copied item" in
     print(f"  [OK] skill_clipboard_paste_previous successfully restored older item: {paste_ret!r}")
 else:
     print(f"  [FAIL] skill_clipboard_paste_previous failed: {paste_ret!r}, current clipboard: {pyperclip.paste()!r}")
+    all_ok = False
+
+
+# ── 17. Memory Explanation and UIA Click Verification ───────────────────
+print("\nMemory Explanation & UIA click verification:")
+from skills import skill_memory_explain, detect_direct_intent
+from automation import click_at
+
+# Test 1: Direct Intent routing for memory question
+intent_mem_explain = detect_direct_intent("Do you have a long time memory or short time memory?")
+if intent_mem_explain and intent_mem_explain[0] == "memory_explain":
+    print(f"  [OK] detect_direct_intent correctly routed memory question to memory_explain")
+else:
+    print(f"  [FAIL] detect_direct_intent did not route memory question: {intent_mem_explain}")
+    all_ok = False
+
+# Test 2: Memory Explain skill execution
+mem_explain_res = skill_memory_explain()
+if "short-term" in mem_explain_res and "long-term" in mem_explain_res:
+    print(f"  [OK] skill_memory_explain executed successfully and returned proper response")
+else:
+    print(f"  [FAIL] skill_memory_explain returned unexpected result: {mem_explain_res!r}")
+    all_ok = False
+
+# Test 3: UIA click input parsing and coordinate boundaries
+click_res_invalid = click_at("9999,9999")
+if "outside screen" in click_res_invalid:
+    print(f"  [OK] click_at correctly rejected out-of-bounds coordinates: {click_res_invalid!r}")
+else:
+    print(f"  [FAIL] click_at failed to reject out-of-bounds coordinates: {click_res_invalid!r}")
+    all_ok = False
+
+click_res_text = click_at("NonExistentUIElementXYZ")
+if "Could not find" in click_res_text or "No active window" in click_res_text or "Failed to bind" in click_res_text or "Element click failed" in click_res_text:
+    print(f"  [OK] click_at gracefully handled non-existent text element: {click_res_text!r}")
+else:
+    print(f"  [FAIL] click_at returned unexpected result for text element: {click_res_text!r}")
     all_ok = False
 
 

@@ -107,6 +107,7 @@ _BROWSER_PROC_MAP: Dict[str, str] = {
 # WhatsApp state storage
 _last_whatsapp_target: Optional[str] = None
 _last_whatsapp_message: Optional[str] = None
+_last_whatsapp_time: float = 0.0
 
 # Apps that should run in the web browser
 _BROWSER_APPS: Dict[str, str] = {
@@ -1200,31 +1201,87 @@ def skill_remember(args: str) -> str:
 
 
 def skill_recall(args: str) -> str:
-    """Recall a note or fact from long-term memory by keyword."""
+    """Recall a note or fact from long-term memory or session history by keyword/semantic search."""
     import json
     import os
+    from memory import PersistentMemory
+    
     query = args.strip().lower()
     path = os.path.join(os.path.expanduser("~"), ".friday", "memory.json")
-    if not os.path.exists(path):
-        return "No memories found."
-    try:
-        with open(path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        notes = data.get("notes", {})
-        if not query:
-            if not notes:
-                return "No notes stored."
-            return "Here are your stored notes:\n" + "\n".join(f"- {k}: {v}" for k, v in notes.items())
+    
+    note_matches = []
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            notes = data.get("notes", {})
+            if query:
+                for k, v in notes.items():
+                    if query in k or query in v.lower():
+                        note_matches.append(f"Note - {k}: {v}")
+            else:
+                if notes:
+                    note_matches.extend(f"Note - {k}: {v}" for k, v in notes.items())
+        except Exception:
+            pass
+
+    # Dynamic semantic vector search over transcript logs
+    semantic_matches = []
+    if query:
+        try:
+            pm = PersistentMemory()
+            matches = pm.semantic_search(query, limit=3)
+            for m in matches:
+                ts = m.get("timestamp", "")[:16].replace("T", " ")
+                semantic_matches.append(f"[{ts}] User: {m.get('user', '')} -> Friday: {m.get('assistant', '')}")
+        except Exception:
+            pass
+            
+    # Combine results
+    result_parts = []
+    if note_matches:
+        result_parts.append("Stored Notes:\n" + "\n".join(note_matches))
+    if semantic_matches:
+        result_parts.append("Semantic Session History Matches:\n" + "\n".join(semantic_matches))
         
-        matches = []
-        for k, v in notes.items():
-            if query in k or query in v.lower():
-                matches.append(f"{k}: {v}")
+    if result_parts:
+        return "\n\n".join(result_parts)
+        
+    return f"No notes or session history matching '{query}' found."
+
+
+def skill_memory_explain(args: str = "") -> str:
+    """Explain Friday's memory architecture (short-term + long-term semantic) and demonstrate semantic recall."""
+    from memory import PersistentMemory
+    pm = PersistentMemory()
+    
+    explanation = (
+        "I possess both short-term and long-term memory. "
+        "My short-term memory maintains active conversation context in a rolling buffer. "
+        "My long-term memory utilizes a lightweight local vector-based semantic search "
+        "over our historical session transcripts, allowing me to recall past sessions "
+        "without needing heavy external databases."
+    )
+    
+    demo_query = "remember"
+    try:
+        matches = pm.semantic_search(demo_query, limit=2)
         if matches:
-            return "Found matches:\n" + "\n".join(matches)
-        return f"No memories matching '{query}' found."
-    except Exception as exc:
-        return f"Failed to recall memory: {exc}"
+            recalled = []
+            for m in matches:
+                ts = m.get("timestamp", "")[:16].replace("T", " ")
+                recalled.append(f"[{ts}] User: '{m.get('user', '')}' -> Friday: '{m.get('assistant', '')}'")
+            explanation += "\n\nTo demonstrate my long-term memory, here is what I recalled semantically from our past sessions:\n" + "\n".join(recalled)
+        else:
+            facts_summary = pm.get_context_summary()
+            if facts_summary:
+                explanation += f"\n\nCurrently, I remember these facts about you: {facts_summary}"
+            else:
+                explanation += "\n\nI haven't recorded any persistent notes or long-term session logs yet."
+    except Exception as e:
+        explanation += f"\n\n(Memory search demo encountered an issue: {e})"
+        
+    return explanation
 
 
 def skill_system_diagnostics(args: str = "") -> str:
@@ -2319,6 +2376,7 @@ class SkillEngine:
             "summarize_url":   skill_summarize_url,
             "clipboard_history": skill_clipboard_history,
             "clipboard_paste_previous": skill_clipboard_paste_previous,
+            "memory_explain":   skill_memory_explain,
         }
 
     def _debug(self, msg: str) -> None:
@@ -2659,7 +2717,7 @@ def detect_direct_intent(user_input: str) -> Optional[tuple[str, str, str]]:
             return ("calculator", expr, "")
 
     # ── YouTube search ───────────�    # ── WhatsApp check/send direct routing ──────────────────────────────
-    global _last_whatsapp_target, _last_whatsapp_message
+    global _last_whatsapp_target, _last_whatsapp_message, _last_whatsapp_time
 
     # Check for unread or new messages
     if any(p in clean for p in ("check whatsapp", "any new messages", "get a new message", "whatsapp notifications")):
@@ -2673,10 +2731,11 @@ def detect_direct_intent(user_input: str) -> Optional[tuple[str, str, str]]:
             if contact and contact.lower() not in ("me", "him", "her", "them", "whatsapp", "message", "msg", "text", "it"):
                 if _last_whatsapp_message:
                     _last_whatsapp_target = contact
+                    _last_whatsapp_time = time.monotonic()
                     return ("whatsapp", f"{contact}||{_last_whatsapp_message}", f"Sending the same WhatsApp message to {contact.title()}.")
 
     # Match corrections
-    if _last_whatsapp_target:
+    if _last_whatsapp_target and (time.monotonic() - _last_whatsapp_time < 30.0):
         correction_match = re.match(
             r"(?:no\s+|not\s+that\s+|i\s+meant\s+|tell\s+him\s+|tell\s+her\s+|say\s+)(.+)",
             clean
@@ -2690,6 +2749,7 @@ def detect_direct_intent(user_input: str) -> Optional[tuple[str, str, str]]:
                 corrected_msg = re.sub(r"^(?:say\s+|send\s+|tell\s+him\s+|tell\s+her\s+)", "", corrected_msg).strip()
                 if len(corrected_msg.split()) > 0 and corrected_msg not in ("yes", "no", "ok", "sure"):
                     _last_whatsapp_message = corrected_msg
+                    _last_whatsapp_time = time.monotonic()
                     return ("whatsapp", f"{_last_whatsapp_target.lower()}||{corrected_msg}", f"Correcting message to {_last_whatsapp_target.title()}.")
 
     # Match new WhatsApp send message
@@ -2722,6 +2782,7 @@ def detect_direct_intent(user_input: str) -> Optional[tuple[str, str, str]]:
             if contact and message and contact.lower() not in ("me", "him", "her", "them", "whatsapp", "message", "msg", "text"):
                 _last_whatsapp_target = contact
                 _last_whatsapp_message = message
+                _last_whatsapp_time = time.monotonic()
                 return ("whatsapp", f"{contact}||{message}", f"Sending WhatsApp message to {contact.title()}.")
 
     # ── Clear content direct routing ────────────────────────────────────
@@ -2768,6 +2829,18 @@ def detect_direct_intent(user_input: str) -> Optional[tuple[str, str, str]]:
     if summarize_match:
         url = summarize_match.group(1).strip()
         return ("summarize_url", url, f"Fetching and summarizing {url}.")
+
+    # ── Memory Explanation direct routing ───────────────────────────────
+    if any(p in clean for p in (
+        "do you have a long time memory or short time memory",
+        "do you have long time memory or short time memory",
+        "do you have a long term memory or short term memory",
+        "do you have long term memory or short term memory",
+        "do you have long term or short term memory",
+        "do you have long time or short time memory",
+        "what kind of memory do you have"
+    )):
+        return ("memory_explain", "", "Let me explain my memory system, sir.")
 
     # No clear intent detected — let the LLM handle it
     return None

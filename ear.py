@@ -909,12 +909,14 @@ class StreamingVoiceCapture:
                 # the domain and common phrases. More context = fewer misheard words.
                 initial_prompt=(
                     "Akhil is talking to his AI assistant named Friday. "
+                    "Projects he works on: DroidBox. "
                     "He gives voice commands like: open notepad, close calculator, "
                     "open WhatsApp, send a message, search the web, play music, "
                     "write code, what is the weather, how are you, go on, "
                     "shut down, nice Friday, what are your skills, "
                     "multiply, add, subtract, divide, calculate. "
-                    "Names he mentions: Akhil, Jay Singh, Friday."
+                    "Names and terms he mentions: Akhil Singh, Jay Singh, Friday, DroidBox, "
+                    "sounddevice_stream, Kokoro, Silero, RNNoise, Qwen3."
                 ),
             )
             # Filter segments by confidence — drop low-quality ones unless it's a critical command
@@ -1044,7 +1046,6 @@ class StreamingVoiceCapture:
                 if res and self.on_speculative_transcript is not None:
                     try:
                         self.on_speculative_transcript(res)
-                        self.debug(f"[speculative] Fired LLM prefill callback: '{res[:60]}...'")
                     except Exception as cb_err:
                         self.debug(f"[speculative] Callback failed: {cb_err}")
             except Exception as e:

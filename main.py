@@ -358,6 +358,9 @@ def run(
             if not speculative_llm_enabled:
                 return  # Skip speculative LLM entirely if not explicitly enabled
             
+            if debug_voice:
+                print(f"[speculative] Fired LLM prefill callback: '{transcript[:60]}...'")
+            
             # Dynamic battery status checking (enables dynamic charger connect/disconnect re-evaluation!)
             try:
                 import psutil

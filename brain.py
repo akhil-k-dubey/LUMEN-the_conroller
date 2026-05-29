@@ -66,6 +66,8 @@ class Brain:
         import threading
         self._history_lock = threading.Lock()
         self._spec_history_prevented = False
+        self._stream_abort = threading.Event()
+        self._active_resp = None
         self._build_system_prompt()
         self.load_history()
         try:
@@ -74,6 +76,16 @@ class Brain:
         except Exception as e:
             self.screen_oracle = None
             self._debug(f"Failed to initialize ScreenOracle: {e}")
+
+    def abort_stream(self) -> None:
+        """Immediate socket-level LLM stream abort."""
+        self._stream_abort.set()
+        if self._active_resp:
+            try:
+                self._active_resp.close()
+                self._debug("Closed active response socket successfully.")
+            except Exception as e:
+                self._debug(f"Failed to close active response socket: {e}")
 
     def save_history(self) -> None:
         try:
@@ -389,6 +401,9 @@ class Brain:
         if not self.enabled:
             return ""
 
+        self._stream_abort.clear()
+        self._active_resp = None
+
         if self.active_model is None:
             self.active_model = self._resolve_model()
             if self.active_model:
@@ -468,7 +483,10 @@ class Brain:
 
         try:
             with request.urlopen(req, timeout=self.timeout_s) as resp:
+                self._active_resp = resp
                 for raw_line in resp:
+                    if self._stream_abort.is_set():
+                        raise OSError("Stream aborted by user request")
                     line = raw_line.decode("utf-8").strip()
                     if not line:
                         continue
@@ -550,8 +568,16 @@ class Brain:
             print()  # newline after Ollama finishes streaming
 
         except (error.URLError, TimeoutError, OSError) as exc:
-            self._debug(f"Ollama stream failed: {exc}")
-            self.active_model = None
+            if self._stream_abort.is_set():
+                self._debug("Ollama stream aborted by user request.")
+            else:
+                self._debug(f"Ollama stream failed: {exc}")
+                self.active_model = None
+            return ""
+        finally:
+            self._active_resp = None
+
+        if self._stream_abort.is_set():
             return ""
 
         # Yield any remaining text in buffer

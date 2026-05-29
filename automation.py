@@ -145,8 +145,11 @@ def press_hotkey(keys: str) -> str:
 # ═══════════════════════════════════════════════════════════════════════════
 
 def click_at(args: str) -> str:
-    """Click at x,y coordinates or current position.
-    Args: 'x,y' or empty for current position.
+    """Click at x,y coordinates, current position, or a named UI element.
+    Args:
+        - 'x,y' or 'x=100,y=200' to click at coordinates.
+        - 'Name' (e.g. 'Search', 'File') to locate and click a UI element.
+        - Empty to click at the current position.
     """
     err = _rate_check()
     if err:
@@ -154,22 +157,83 @@ def click_at(args: str) -> str:
     pag = _get_pyautogui()
     if not pag:
         return "pyautogui not installed."
+        
+    query = args.strip()
+    if not query:
+        pag.click()
+        return "Clicked at current position."
+        
+    # Check if coordinates (e.g., '100,200')
+    coord_match = re.match(r'^(?:[xy]=)?(\d+)\s*,\s*(?:[xy]=)?(\d+)$', query, re.IGNORECASE)
+    if coord_match:
+        x, y = int(coord_match.group(1)), int(coord_match.group(2))
+        screen_w, screen_h = pag.size()
+        if not (0 <= x <= screen_w and 0 <= y <= screen_h):
+            return f"Coordinates ({x},{y}) outside screen ({screen_w}x{screen_h})."
+        pag.click(x, y)
+        return f"Clicked at coordinates ({x}, {y})."
+        
+    # Element-Based UI Automation search
     try:
-        if args.strip():
-            # Handle both '100,200' and 'x=100,y=200' formats
-            cleaned_args = re.sub(r'[xy]=', '', args.strip(), flags=re.IGNORECASE)
-            parts = cleaned_args.replace(" ", "").split(",")
-            x, y = int(parts[0]), int(parts[1])
-            screen_w, screen_h = pag.size()
-            if not (0 <= x <= screen_w and 0 <= y <= screen_h):
-                return f"Coordinates ({x},{y}) outside screen ({screen_w}x{screen_h})."
-            pag.click(x, y)
-            return f"Clicked at ({x}, {y})."
-        else:
-            pag.click()
-            return "Clicked at current position."
+        import uiautomation as auto
+        import win32gui
+        
+        hwnd = win32gui.GetForegroundWindow()
+        if not hwnd:
+            return "No active window found to perform element-based UI click."
+            
+        window_ctrl = auto.ControlFromHandle(hwnd)
+        if not window_ctrl:
+            return "Failed to bind UI automation controller to active window."
+            
+        # Strategy 1: Direct Exact/Fuzzy uiautomation Control lookup (fast)
+        found = None
+        # Try finding as Button, MenuItem, Edit, Text, or generic Control
+        for name_val in (query, query.capitalize(), query.title()):
+            elem = window_ctrl.Control(searchDepth=8, Name=name_val)
+            if elem.Exists(0.05, 0):
+                found = elem
+                break
+                
+        # Strategy 2: Recursive UI Tree Walk (highly robust fallback)
+        if not found:
+            def find_element(control):
+                nonlocal found
+                if found is not None:
+                    return
+                try:
+                    name = control.Name
+                    if name and (query.lower() in name.lower()):
+                        found = control
+                        return
+                    auto_id = control.AutomationId
+                    if auto_id and (query.lower() in auto_id.lower()):
+                        found = control
+                        return
+                except Exception:
+                    pass
+                
+                try:
+                    child = control.GetFirstChildControl()
+                    while child:
+                        find_element(child)
+                        child = child.GetNextSiblingControl()
+                except Exception:
+                    pass
+            
+            find_element(window_ctrl)
+            
+        if found:
+            rect = found.BoundingRectangle
+            if rect.width() > 0 and rect.height() > 0:
+                click_x = rect.left + rect.width() // 2
+                click_y = rect.top + rect.height() // 2
+                pag.click(click_x, click_y)
+                return f"Clicked UI element '{found.Name}' (type={found.ControlTypeName}) at ({click_x}, {click_y}) based on active window UI tree query."
+                
+        return f"Could not find any UI element matching '{query}' in the active window '{win32gui.GetWindowText(hwnd)}'."
     except Exception as exc:
-        return f"Click failed: {exc}"
+        return f"Element click failed: {exc}"
 
 
 def scroll_mouse(args: str) -> str:

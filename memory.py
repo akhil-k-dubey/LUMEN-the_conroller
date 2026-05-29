@@ -235,6 +235,98 @@ class PersistentMemory:
     def get_preference(self, key: str) -> Optional[str]:
         return self.preferences.get(key.strip().lower())
 
+    def semantic_search(self, query: str, limit: int = 3) -> List[dict]:
+        """
+        Lightweight, pure-Python semantic vector search over the entire history.jsonl.
+        Tokenizes text, builds TF-IDF representation, and returns matches using Cosine Similarity.
+        """
+        if not os.path.exists(self.history_file):
+            return []
+        
+        # 1. Read all turns from history
+        turns = []
+        try:
+            with open(self.history_file, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        entry = json.loads(line)
+                        if entry.get("user") and entry.get("assistant"):
+                            turns.append(entry)
+                    except Exception:
+                        continue
+        except Exception:
+            return []
+            
+        if not turns:
+            return []
+            
+        # 2. Tokenize helper
+        def tokenize(text: str) -> List[str]:
+            text = text.lower()
+            text = re.sub(r'[^\w\s]', ' ', text)
+            return [w for w in text.split() if len(w) >= 2]
+            
+        # 3. Build corpus and compute Document Frequency (DF)
+        corpus_tokens = []
+        df = {}
+        for turn in turns:
+            tokens = tokenize(turn["user"] + " " + turn["assistant"])
+            corpus_tokens.append(tokens)
+            unique_tokens = set(tokens)
+            for token in unique_tokens:
+                df[token] = df.get(token, 0) + 1
+                
+        # 4. Compute IDF
+        import math
+        num_docs = len(turns)
+        idf = {}
+        for token, freq in df.items():
+            idf[token] = math.log((1 + num_docs) / (1 + freq)) + 1
+            
+        # 5. Helper to compute TF-IDF vector
+        def get_tfidf_vector(tokens: List[str]) -> Dict[str, float]:
+            tf = {}
+            for t in tokens:
+                tf[t] = tf.get(t, 0) + 1
+            vector = {}
+            for t, count in tf.items():
+                if t in idf:
+                    vector[t] = count * idf[t]
+            return vector
+            
+        # 6. Helper to compute cosine similarity
+        def cosine_similarity(v1: Dict[str, float], v2: Dict[str, float]) -> float:
+            dot = sum(v1[t] * v2.get(t, 0.0) for t in v1)
+            norm1 = math.sqrt(sum(val ** 2 for val in v1.values()))
+            norm2 = math.sqrt(sum(val ** 2 for val in v2.values()))
+            if norm1 == 0.0 or norm2 == 0.0:
+                return 0.0
+            return dot / (norm1 * norm2)
+            
+        # 7. Compute vector for query
+        query_tokens = tokenize(query)
+        if not query_tokens:
+            return []
+        query_vector = get_tfidf_vector(query_tokens)
+        
+        # 8. Score each document
+        scored_turns = []
+        for i, turn in enumerate(turns):
+            turn_tokens = corpus_tokens[i]
+            if not turn_tokens:
+                continue
+            turn_vector = get_tfidf_vector(turn_tokens)
+            sim = cosine_similarity(query_vector, turn_vector)
+            if sim > 0.05:  # small relevance threshold
+                scored_turns.append((sim, turn))
+                
+        # 9. Sort and return top limit
+        scored_turns.sort(key=lambda x: x[0], reverse=True)
+        return [item[1] for item in scored_turns[:limit]]
+
     # ── System prompt context ──────────────────────────────────────────────
 
     def get_context_summary(self) -> str:

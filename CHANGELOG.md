@@ -462,10 +462,3 @@ This log documents key architectural refactors, sandboxing enhancements, and run
 > [!IMPORTANT]
 > **Issue**: In `_transcribe_whisper`, referencing `contains_numbers` inside the segment loop (line 956) before its assignment (line 971) caused an `UnboundLocalError` due to Python's lexical scoping treating it as an unassigned local.
 > *   **Decision**: Replaced the outer `contains_numbers` reference inside the segment loop with `seg_has_numbers`, computed locally and dynamically from the current segment's `text`. This resolves the scope violation and guarantees correct per-segment no-speech thresholds.
-
-
-
-
-
-
-
