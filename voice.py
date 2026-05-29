@@ -81,8 +81,6 @@ class VoiceIO:
     _alarm_queue:            queue.Queue     = field(default_factory=queue.Queue, repr=False)
     _current_voice_style:    Optional[object] = field(default=None, repr=False)
     played_sentences:        list[str]       = field(default_factory=list, repr=False)
-    _pipeline_active:        bool            = field(default=False,              repr=False)
-    _on_stream_abort:        Optional[object] = field(default=None,              repr=False)
 
     def __post_init__(self) -> None:
         # ── Mic setup ──
@@ -92,8 +90,6 @@ class VoiceIO:
         self.stt_backend, self.whisper_model = setup_stt_backend(
             self.whisper_model_size, self._debug
         )
-
-        self._active_barge_in_prefix = None
 
         # ── Kokoro TTS setup ──
         self._init_kokoro()
@@ -233,9 +229,7 @@ class VoiceIO:
             return None
 
         if self._streaming_capture:
-            prefix = getattr(self, "_active_barge_in_prefix", None)
-            self._active_barge_in_prefix = None  # consume and reset
-            transcript = self._streaming_capture.listen_for_utterance(prefix_pcm=prefix)
+            transcript = self._streaming_capture.listen_for_utterance()
             if transcript and transcript.strip():
                 # Automatically enroll or update owner voiceprint if not enrolled yet!
                 history_dir = os.path.dirname(__file__)
@@ -330,7 +324,7 @@ class VoiceIO:
                 dtype='float32',
             )
             _out_stream.start()
-            chunk_size = sample_rate // 50  # 20ms chunks (was 100ms)
+            chunk_size = sample_rate // 10  # 100ms chunks
             flat = samples.flatten() if samples.ndim > 1 else samples
             offset = 0
             play_duration = len(flat) / sample_rate
@@ -470,8 +464,8 @@ class VoiceIO:
                     samples, sr_rate = result
                     import numpy as _np
 
-                    # Wait if the assistant is currently speaking or in an active task loop to avoid overlapping output
-                    while (self._streaming_capture and self._streaming_capture._speaking) or getattr(self, "_pipeline_active", False):
+                    # Wait if the assistant is currently speaking to avoid overlapping output
+                    while self._streaming_capture and self._streaming_capture._speaking:
                         time.sleep(0.2)
 
                     out = sd.OutputStream(
@@ -609,6 +603,9 @@ class VoiceIO:
           (b) chunk RMS ≥ loopback_baseline_ema × RMS_GATE_MULTIPLIER (2.2×)
         → fires stop_playback() to cut TTS immediately.
 
+        After confirmation, drains barge_q for ~300ms to capture the user's
+        full interrupted sentence before handing off to listen_for_utterance().
+
         WHY DUAL GATE:
         The stream stays live during TTS (single-stream WASAPI design), so the
         mic picks up TTS loopback from speakers. Silero scores loopback as
@@ -621,6 +618,9 @@ class VoiceIO:
 
           2. Duration (CONFIRM_CHUNKS=2 = 64ms): fast trigger for responsive
              interruption. 2 grace misses tolerate natural energy dips.
+
+        Tune RMS_GATE_MULTIPLIER lower (2.0) if barge-in is hard to trigger,
+        higher (3.5) if speaker loopback still causes false positives.
         """
         if np is None or self._streaming_capture is None:
             return
@@ -628,35 +628,53 @@ class VoiceIO:
         BARGE_IN_THRESHOLD  = 0.80   # lowered: more sensitive to human voice
         CONFIRM_CHUNKS      = 2      # 2×32ms=64ms — fast trigger, still deliberate
         CHUNK_SIZE          = 512    # 32ms at 16kHz — Silero requirement
-        RMS_GATE_MULTIPLIER = 2.2    # slightly easier for real user voice to beat
+        RMS_GATE_MULTIPLIER = 2.2    # slightly easier for real user voice to beat (tuned from 3.0)
         RMS_EMA_ALPHA       = 0.12   # EMA smoothing for loopback baseline
-        RMS_FLOOR           = 0.0015 # lower floor — allows low-gain/quiet mics to barge in
-        MAX_BASELINE        = 0.020  # cap: need≥ never exceeds 0.020×2.2=0.044
+        RMS_FLOOR           = 0.0015 # lower floor — allows low-gain/quiet mics to barge in (tuned from 0.008)
+        MAX_BASELINE        = 0.020  # cap: need≥ never exceeds 0.020×2.2=0.044 (tuned from 0.025)
+        #   Without this cap the EMA tracks loud laptop loopback (0.06–0.09 RMS)
+        #   and pushes need≥ to 0.17+, which real user voice cannot beat.
+        #   With the cap: loopback mostly rejected; user speaking clearly at
+        #   0.05+ RMS for 160ms triggers reliably.
 
         vad              = self._streaming_capture.vad
         consecutive      = 0
-        
-        rms_baseline_ema = RMS_FLOOR
-
+        rms_baseline_ema = RMS_FLOOR  # start AT floor — never below the minimum gate
         _barge_in_confirmed = False
+        # Adaptive confirm target — updated per chunk based on RMS confidence.
         _confirm_target  = CONFIRM_CHUNKS
-        _grace_remaining = 2   # allow 2 natural energy dips
-        
-        import collections
-        rolling_prebuf = collections.deque(maxlen=40)  # ~1.28s of onset capture
+        # Grace-miss counter: allows 1 soft-miss per barge-in run.
+        # Human speech has natural inter-phoneme energy dips; a single weak
+        # 32ms chunk should NOT destroy a confirmed run.
+        _grace_remaining = 2   # allow 2 natural energy dips (was 1)
+        # Speech chunks that passed BOTH gates — saved to pre-buffer on confirm.
+        # Reset whenever consecutive drops to 0 (loopback broke the run).
+        speech_chunks: list = []
+        # RAW (pre-decimate) versions of speech_chunks — saved so that
+        # listen_for_utterance() can run them through RNNoise to strip
+        # loopback and recover the user's speech onset (~200ms).
+        speech_chunks_raw: list = []
 
         # Wire up the queue — callback will feed it while _speaking=True
+        #
+        # Unbounded (maxsize=0): the monitor processes each chunk in ~1-3ms
+        # (Silero CPU inference); chunks arrive every 32ms (31/sec at 48kHz).
+        # The monitor runs at 10-30× the input rate — no backlog can build.
+        # A bounded queue with put_nowait() would silently drop NEW chunks
+        # while keeping STALE ones — exactly wrong for real-time detection.
+        # The queue is GC'd when the pipeline ends, so unbounded is safe.
         barge_q: queue.Queue = queue.Queue()
         self._streaming_capture._barge_in_queue = barge_q
 
         # Wait for actual audio before watching for interrupts
+        # If pipeline ends before audio ever plays (LLM failed etc), exit cleanly
         playback_started.wait(timeout=15.0)
         if stop_event.is_set():
             self._streaming_capture._barge_in_queue = None
             return
 
-        # Warm up EMA baseline with 4 chunks (~128ms)
-        WARMUP_CHUNKS = 4
+        # Collect baseline samples first to warm up the EMA
+        WARMUP_CHUNKS = 8   # ~256ms of loopback to seed the EMA
         warmed = 0
         warmup_rms_values = []
         while warmed < WARMUP_CHUNKS and not stop_event.is_set():
@@ -675,18 +693,15 @@ class VoiceIO:
             elif len(chunk) > CHUNK_SIZE:
                 chunk = chunk[:CHUNK_SIZE]
 
-            # Collect chunk in rolling_prebuf even during warmup!
-            rolling_prebuf.append(chunk.copy())
-
             rms = float(np.sqrt(np.mean(chunk ** 2)))
-            if rms > 0.001:
+            if rms > 0.001:   # only update from non-silent chunks (real loopback)
                 warmup_rms_values.append(rms)
                 rms_baseline_ema = (
                     RMS_EMA_ALPHA * rms + (1 - RMS_EMA_ALPHA) * rms_baseline_ema
                 )
             warmed += 1
 
-        max_loopback = min(0.010, np.max(warmup_rms_values)) if warmup_rms_values else 0.005
+        max_loopback = np.max(warmup_rms_values) if warmup_rms_values else 0.020
         if max_loopback > 0.035:
             dynamic_multiplier = 1.35
             dynamic_max_baseline = max_loopback * 1.05
@@ -696,8 +711,12 @@ class VoiceIO:
 
         self._debug(
             f"[barge-in] baseline warmed: {rms_baseline_ema:.4f}, "
-            f"max loopback: {max_loopback:.4f}, dynamic mult: {dynamic_multiplier:.2f}"
+            f"max loopback: {max_loopback:.4f}, dynamic mult: {dynamic_multiplier:.2f}, "
+            f"dynamic cap: {dynamic_max_baseline:.4f}"
         )
+
+        import collections
+        rolling_prebuf = collections.deque(maxlen=25)  # ~800ms of onset capture
 
         try:
             while not stop_event.is_set():
@@ -706,31 +725,40 @@ class VoiceIO:
                 except queue.Empty:
                     continue
                 if raw is None:
-                    break
+                    break  # sentinel from pipeline end — exit immediately
 
+                # ── Decimate to 16kHz (inline, no shared DSP state) ─────────
+                # We intentionally skip _process_chunk() / RNNoise here.
+                # _denoiser.denoise_chunk() mutates a stateful GRU — calling it
+                # from this thread concurrently with listen_for_utterance() would
+                # be a data race on the RNNoise C context (corruption / crash).
+                # Barge-in only needs a rough speech probability, not clean audio;
+                # a plain decimate slice is sufficient and touches zero shared state.
                 if self._streaming_capture._denoiser is not None:
-                    chunk = raw[::self._streaming_capture._DECIMATE]
+                    chunk = raw[::self._streaming_capture._DECIMATE]  # 48kHz → 16kHz
                 else:
-                    chunk = raw
+                    chunk = raw  # stream is already 16kHz
 
+                # Pad / trim to exactly 512 samples for Silero
                 if len(chunk) < CHUNK_SIZE:
                     chunk = np.pad(chunk, (0, CHUNK_SIZE - len(chunk)))
                 elif len(chunk) > CHUNK_SIZE:
                     chunk = chunk[:CHUNK_SIZE]
 
-                # Accumulate sliding pre-buffer window
                 rolling_prebuf.append(chunk.copy())
 
                 prob = vad.speech_prob(chunk)
                 rms  = float(np.sqrt(np.mean(chunk ** 2)))
                 rms_required = max(
-                    max_loopback * 1.15,
+                    max_loopback * 1.3,  # must beat measured loopback by 30%
                     max(RMS_FLOOR, min(rms_baseline_ema, dynamic_max_baseline)) * dynamic_multiplier
                 )
 
                 if prob >= BARGE_IN_THRESHOLD:
+                    # ── RMS relative gate ──────────────────────────────────
                     rms_ok = rms >= rms_required
                     if rms_ok:
+                        # ── Adaptive confirmation window ───────────────────
                         ratio = rms / max(rms_required, 1e-9)
                         if ratio >= 2.0:
                             _confirm_target = max(3, CONFIRM_CHUNKS - 1)
@@ -738,6 +766,8 @@ class VoiceIO:
                             _confirm_target = CONFIRM_CHUNKS
                         else:
                             _confirm_target = CONFIRM_CHUNKS + 1
+                        speech_chunks.append(chunk)       # save for pre-buffer
+                        speech_chunks_raw.append(raw.copy())  # raw for RNNoise recovery
                         consecutive += 1
                         self._debug(
                             f"[barge-in] prob={prob:.2f} rms={rms:.4f} "
@@ -746,17 +776,57 @@ class VoiceIO:
                         if consecutive >= _confirm_target:
                             if stop_event.is_set():
                                 return
+                            # NOTE: Speaker verification (voiceprint) is intentionally
+                            # SKIPPED during barge-in. The mic audio contains TTS
+                            # loopback mixed with the user's voice, so the mel
+                            # spectrogram never matches the clean enrolled voiceprint.
+                            # The RMS + VAD dual gate is sufficient to separate
+                            # loopback from real speech.
 
-                            self._debug("[barge-in] CONFIRMED — stopping playback immediately")
+                            self._debug("[barge-in] CONFIRMED — saving audio + stopping playback")
                             _barge_in_confirmed = True
                             
-                            # Pre-seed the legacy buffer as fallback
+                            # ── Drain barge_q for ~300ms to capture the user's full sentence ──
+                            # After confirmation, the user is still talking. We need to
+                            # grab those chunks before stop_playback() kills the route.
+                            drain_deadline = time.monotonic() + 0.30
+                            drain_chunks = []
+                            while time.monotonic() < drain_deadline:
+                                try:
+                                    drain_raw = barge_q.get(timeout=0.04)
+                                    if drain_raw is None:
+                                        break
+                                    if self._streaming_capture._denoiser is not None:
+                                        drain_chunk = drain_raw[::self._streaming_capture._DECIMATE]
+                                    else:
+                                        drain_chunk = drain_raw
+                                    if len(drain_chunk) < CHUNK_SIZE:
+                                        drain_chunk = np.pad(drain_chunk, (0, CHUNK_SIZE - len(drain_chunk)))
+                                    elif len(drain_chunk) > CHUNK_SIZE:
+                                        drain_chunk = drain_chunk[:CHUNK_SIZE]
+                                    drain_chunks.append(drain_chunk.copy())
+                                except queue.Empty:
+                                    continue
+
+                            # Save ALL rolling pre-buffer + drain chunks (~800ms + 300ms of onset)
+                            all_processed = list(rolling_prebuf) + drain_chunks
                             with self._streaming_capture._barge_in_lock:
-                                self._streaming_capture._barge_in_audio_buffer = list(rolling_prebuf)
-                            
+                                self._streaming_capture._barge_in_audio_buffer = all_processed
+                            self._debug(
+                                f"[barge-in] pre-buffer: {len(all_processed)} chunks "
+                                f"({len(all_processed)*32}ms) saved"
+                            )
                             self.stop_playback()
                             return
                     else:
+                        # ── Soft-miss tolerance ──────────────────────────────
+                        # Human speech has natural inter-phoneme energy dips.
+                        # If we are mid-run (consecutive ≥ 1) AND this chunk is
+                        # close to the threshold (≥ 70% of required RMS), AND
+                        # we have grace remaining, apply a soft reset:
+                        # decrement by 1 instead of wiping to 0.
+                        # This tolerates one genuinely weak 32ms phoneme in the
+                        # middle of real user speech.
                         close_enough = rms >= rms_required * 0.70
                         if consecutive >= 1 and close_enough and _grace_remaining > 0:
                             _grace_remaining -= 1
@@ -765,18 +835,25 @@ class VoiceIO:
                                 f"[barge-in] prob={prob:.2f} rms={rms:.4f} "
                                 f"need≥{rms_required:.4f} SOFT-MISS ({consecutive} left)"
                             )
+                            # Do NOT update EMA — this chunk is probably user voice
                         else:
                             consecutive = 0
-                            _grace_remaining = 2
+                            speech_chunks = []       # reset — this run was loopback
+                            speech_chunks_raw = []
+                            _grace_remaining = 2     # restore grace for next run
                             self._debug(
                                 f"[barge-in] prob={prob:.2f} rms={rms:.4f} "
                                 f"need≥{rms_required:.4f} loopback"
                             )
+                            # Update baseline from high-prob loopback
                             rms_baseline_ema = min(
                                 MAX_BASELINE,
                                 RMS_EMA_ALPHA * rms + (1 - RMS_EMA_ALPHA) * rms_baseline_ema
                             )
                 elif prob >= 0.50:
+                    # Medium-probability chunk: Silero is uncertain — could be
+                    # attenuated loopback or a soft consonant. Apply soft-miss
+                    # if we have an active run, otherwise full reset.
                     if consecutive >= 1 and _grace_remaining > 0:
                         _grace_remaining -= 1
                         consecutive = max(0, consecutive - 1)
@@ -786,6 +863,8 @@ class VoiceIO:
                         )
                     else:
                         consecutive = 0
+                        speech_chunks = []
+                        speech_chunks_raw = []
                         _grace_remaining = 2
                         if rms < rms_required:
                             rms_baseline_ema = min(
@@ -968,49 +1047,37 @@ class VoiceIO:
         causing Whisper to miss the user's first words.
         """
         self._playback_stop.set()
-        if getattr(self, "_on_stream_abort", None):
-            try:
-                self._on_stream_abort()
-            except Exception as e:
-                self._debug(f"Failed to invoke stream abort callback: {e}")
         # Zero the cooldown so listen() doesn't wait 1.2s after barge-in.
         self._last_tts_time = 0.0
         self._barge_in_speech_pending = True
 
-        # Extract the raw PCM history from the streaming capture BEFORE speaking is set to False
+        # Atomically flush queues to prevent any remaining sentences from generating or playing
+        if hasattr(self, "_sentence_q") and self._sentence_q is not None:
+            while not self._sentence_q.empty():
+                try:
+                    self._sentence_q.get_nowait()
+                except queue.Empty:
+                    break
+            try:
+                self._sentence_q.put_nowait(None)
+            except Exception:
+                pass
+        if hasattr(self, "_audio_q") and self._audio_q is not None:
+            while not self._audio_q.empty():
+                try:
+                    self._audio_q.get_nowait()
+                except queue.Empty:
+                    break
+            try:
+                self._audio_q.put_nowait(None)
+            except Exception:
+                pass
+
+        # Signal the capture so resume_after_tts() skips its 300ms sleep.
+        # The user is already speaking — any delay clips their first word.
         if self._streaming_capture is not None:
             self._streaming_capture._barge_in_fired = True
             # Route mic audio to _audio_queue IMMEDIATELY.
+            # Without this, _speaking=True + _barge_in_queue=None (deregistered
+            # by monitor's finally block) = audio silently dropped for ~200ms.
             self._streaming_capture._speaking = False
-
-            # Thread-safe extraction of raw pcm history
-            with self._streaming_capture._barge_in_lock:
-                raw_history = list(self._streaming_capture._barge_in_pcm_history)
-                self._streaming_capture._barge_in_pcm_history.clear()
-            self._active_barge_in_prefix = raw_history
-            self._debug(f"[stop_playback] Extracted {len(raw_history)} raw chunks from barge_in_pcm_history")
-
-        # Thread-safe and robust queue flushing
-        sq = getattr(self, "_sentence_q", None)
-        if sq is not None:
-            try:
-                while not sq.empty():
-                    try:
-                        sq.get_nowait()
-                    except queue.Empty:
-                        break
-                sq.put_nowait(None)
-            except Exception:
-                pass
-
-        aq = getattr(self, "_audio_q", None)
-        if aq is not None:
-            try:
-                while not aq.empty():
-                    try:
-                        aq.get_nowait()
-                    except queue.Empty:
-                        break
-                aq.put_nowait(None)
-            except Exception:
-                pass
