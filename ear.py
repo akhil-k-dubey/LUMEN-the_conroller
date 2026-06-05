@@ -341,6 +341,14 @@ def setup_stt_backend(
     # Try CUDA first, then CPU as last resort
     for device, compute in (("cuda", "int8_float16"), ("cpu", "int8")):
         try:
+            # If distil-large-v3 is selected and not cached, notify the user about the download
+            if whisper_model_size == "distil-large-v3":
+                cache_dir = os.path.join(os.path.expanduser("~"), ".cache", "huggingface", "hub", "models--Systran--faster-distil-whisper-large-v3")
+                if not os.path.exists(cache_dir) or not os.path.exists(os.path.join(cache_dir, "snapshots")):
+                    print("\n[STT] 'distil-large-v3' is not fully cached locally.")
+                    print("  -> Downloading model files from Hugging Face (~1.5 GB)...")
+                    print("  -> This is a one-time download and may take a few minutes. Please wait...\n")
+
             debug(f"Loading whisper '{whisper_model_size}' on {device} ({compute})...")
             model = WhisperModel(
                 whisper_model_size,
