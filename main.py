@@ -1035,8 +1035,8 @@ if __name__ == "__main__":
     parser.add_argument("--always-on",  action="store_true", help="Skip standby, always listening.")
     parser.add_argument("--debug-voice", action="store_true", help="Print voice diagnostics.")
     parser.add_argument(
-        "--whisper-model", default="small.en",
-        help="Whisper model size: tiny.en, base.en, small.en (default), medium.en",
+        "--whisper-model", default="distil-large-v3",
+        help="Whisper model size: tiny.en, base.en, small.en, medium.en, distil-large-v3 (default)",
     )
     parser.add_argument(
         "--stt-language", default="en-IN",

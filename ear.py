@@ -653,8 +653,8 @@ class StreamingVoiceCapture:
 
     # ── main listen loop (blocking, called from voice thread) ──
 
-    # Pre-speech ring buffer: ~100ms lookback at 32ms/chunk = 3 chunks
-    _PRE_SPEECH_CHUNKS = 3
+    # Pre-speech ring buffer: ~128ms lookback at 32ms/chunk = 4 chunks
+    _PRE_SPEECH_CHUNKS = 4
 
     def listen_for_utterance(self) -> Optional[str]:
         """
@@ -891,8 +891,8 @@ class StreamingVoiceCapture:
             segments, info = self.whisper_model.transcribe(
                 buf,
                 language=self.stt_language.split("-")[0],  # "en-IN" → "en"
-                beam_size=5,              # better accuracy
-                best_of=3,                # 3 sampling passes → pick best (was 1)
+                beam_size=4,              # optimized decoding accuracy
+                best_of=3,                # 3 sampling passes
                 vad_filter=True,          # Whisper's own VAD as second pass
                 vad_parameters={
                     "min_silence_duration_ms": 300,
@@ -901,8 +901,8 @@ class StreamingVoiceCapture:
                 condition_on_previous_text=False,
                 temperature=0.0,          # greedy — fastest + most consistent
                 # ── Anti-hallucination ──
-                no_speech_threshold=0.55,  # balanced: not too strict, not too lax
-                log_prob_threshold=-0.5,   # relaxed from -0.6 — was dropping real speech
+                no_speech_threshold=0.60,  # optimized: ignores quiet noise floor anomalies
+                log_prob_threshold=-1.0,   # optimized: prevents dropping quiet consonant syllables
                 hallucination_silence_threshold=0.3,
                 # ── Domain vocabulary ──
                 # Seeds the decoder with conversational context so it knows

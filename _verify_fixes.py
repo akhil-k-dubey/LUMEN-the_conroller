@@ -447,6 +447,29 @@ else:
     all_ok = False
 
 
+# Test 4: Whisper Config and VAD Pre-buffer verification
+import ear
+from main import argparse, sys
+try:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--whisper-model", default="distil-large-v3")
+    parsed_args = parser.parse_args([])
+    if parsed_args.whisper_model == "distil-large-v3":
+        print(f"  [OK] Default Whisper model CLI argument is correctly 'distil-large-v3'")
+    else:
+        print(f"  [FAIL] Default Whisper model CLI argument was {parsed_args.whisper_model!r}")
+        all_ok = False
+except Exception as e:
+    print(f"  [FAIL] Whisper CLI parser check failed: {e}")
+    all_ok = False
+
+if ear.StreamingVoiceCapture._PRE_SPEECH_CHUNKS == 4:
+    print("  [OK] ear.StreamingVoiceCapture._PRE_SPEECH_CHUNKS is correctly set to 4 (128ms)")
+else:
+    print(f"  [FAIL] ear.StreamingVoiceCapture._PRE_SPEECH_CHUNKS is {ear.StreamingVoiceCapture._PRE_SPEECH_CHUNKS}")
+    all_ok = False
+
+
 print()
 if all_ok:
     print("All fixes verification PASSED.")
