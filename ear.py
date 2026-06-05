@@ -8,6 +8,9 @@ Architecture:
 """
 from __future__ import annotations
 
+import os
+os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
+
 import collections
 import importlib
 import io
