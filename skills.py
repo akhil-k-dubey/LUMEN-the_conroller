@@ -2394,7 +2394,7 @@ class SkillEngine:
     def _fuzzy_match_skill(self, name: str):
         """Fuzzy-match an unknown skill name to the closest known skill."""
         from difflib import get_close_matches
-        matches = get_close_matches(name, self.skills.keys(), n=1, cutoff=0.6)
+        matches = get_close_matches(name, self.skills.keys(), n=1, cutoff=0.75)
         return matches[0] if matches else None
 
     def validate_action_tags(self, text: str) -> tuple:

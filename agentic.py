@@ -139,13 +139,7 @@ class AgenticTaskLoop:
             f"You are FRIDAY's task planner. Break this task into steps:\n"
             f"TASK: {task}\n\n"
             f"Available skills (use ONLY these exact names in the 'skill' field):\n"
-            f"  open_app, close_app, close_tab, process_list,\n"
-            f"  smart_open, open_url, browser_search, youtube_search, web_search,\n"
-            f"  file_read, file_write, file_edit, file_search, find_and_open,\n"
-            f"  run_code, git_query,\n"
-            f"  type_text, press_keys, click, scroll, focus_window, list_windows, wait,\n"
-            f"  powershell, system_info, clipboard_read, clipboard_write, volume, screenshot,\n"
-            f"  calculator, weather, datetime, timer, remind, whatsapp, whatsapp_check_messages\n\n"
+            f"  {', '.join(sorted(self.skill_engine.skills.keys()))}\n\n"
             f"Reply ONLY with a JSON array of steps. Each step:\n"
             f'  {{"step": 1, "description": "what this step does", '
             f'"skill": "skill_name", "args": "skill arguments"}}\n\n'
@@ -223,6 +217,25 @@ class AgenticTaskLoop:
                     skill=str(s.get("skill", "")).strip(),
                     args=str(s.get("args", "")).strip(),
                 ))
+
+            # ── Validate skill names against registry ──────────────────
+            valid_skills = set(self.skill_engine.skills.keys())
+            validated = []
+            for step in steps:
+                if step.skill in valid_skills:
+                    validated.append(step)
+                else:
+                    closest = self.skill_engine._fuzzy_match_skill(step.skill)
+                    if closest:
+                        self._log(f"Planner wrote '{step.skill}' -> corrected to '{closest}'")
+                        step.skill = closest
+                        validated.append(step)
+                    else:
+                        self._log(f"Planner hallucinated skill '{step.skill}' -- dropping step")
+            steps = validated
+            # Re-index after filtering
+            for i, step in enumerate(steps):
+                step.index = i + 1
 
             self._log(f"Plan: {len(steps)} steps parsed")
             return steps, False

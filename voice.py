@@ -68,6 +68,7 @@ class VoiceIO:
     stt_language:          str   = "en-IN"
     post_tts_cooldown_s:   float = 1.2
     debug:                 bool  = False
+    speaker_lock:          bool  = False
     whisper_model:         Optional[object] = None
     tts_effective_backend: str   = "none"
 
@@ -238,6 +239,14 @@ class VoiceIO:
                     last_audio = getattr(self._streaming_capture, "_last_transcribed_audio", None)
                     if last_audio is not None:
                         self.enroll_owner_voice(last_audio)
+                # Speaker verification gate — reject non-owner input
+                if self.speaker_lock:
+                    last_audio = getattr(self._streaming_capture, "_last_transcribed_audio", None)
+                    if last_audio is not None:
+                        is_owner = self._verify_speaker([last_audio])
+                        if not is_owner:
+                            self._debug(f"[speaker-lock] Rejected input — speaker mismatch: {transcript[:40]!r}")
+                            return None
             return transcript
 
         # Fallback: speech_recognition mic (PyAudio backend)

@@ -48,8 +48,9 @@ class Brain:
     timeout_s: float = 60.0
     debug: bool = False
     active_model: Optional[str] = None
+    _ollama_healthy: bool = True
     conversation_history: list[dict] = field(default_factory=list)
-    max_history: int = 8
+    max_history: int = 20
 
     # Skill prompt injection (set by main.py)
     skill_prompt: str = ""
@@ -93,6 +94,37 @@ class Brain:
                 json.dump(self.conversation_history, f, indent=2, ensure_ascii=False)
         except Exception as e:
             self._debug(f"Failed to save conversation history: {e}")
+
+    def _summarize_oldest(self, n_turns: int = 8) -> None:
+        """Summarize the oldest N turns into a system message to preserve context."""
+        n_messages = n_turns * 2
+        if len(self.conversation_history) < n_messages + 4:
+            return  # Not enough history to summarize
+
+        oldest = self.conversation_history[:n_messages]
+        transcript = "\n".join(
+            f"{m['role'].upper()}: {m['content'][:200]}"
+            for m in oldest
+        )
+
+        summary = self.generate_simple(
+            f"Summarize this conversation in 3 concise sentences. "
+            f"Preserve key facts, names, and decisions:\n\n{transcript}",
+            max_tokens=150, temperature=0.2,
+        )
+
+        if not summary:
+            # LLM unreachable — fall back to simple trim
+            self.conversation_history = self.conversation_history[n_messages:]
+            self._debug("Summarization failed — trimmed oldest turns")
+            return
+
+        summary_entry = {
+            "role": "system",
+            "content": f"Summary of earlier conversation: {summary}",
+        }
+        self.conversation_history = [summary_entry] + self.conversation_history[n_messages:]
+        self._debug(f"Summarized {n_turns} oldest turns into system message")
 
     def load_history(self) -> None:
         if os.path.exists(_HISTORY_FILE):
@@ -484,6 +516,7 @@ class Brain:
         try:
             with request.urlopen(req, timeout=self.timeout_s) as resp:
                 self._active_resp = resp
+                self._ollama_healthy = True
                 for raw_line in resp:
                     if self._stream_abort.is_set():
                         raise OSError("Stream aborted by user request")
@@ -573,6 +606,7 @@ class Brain:
             else:
                 self._debug(f"Ollama stream failed: {exc}")
                 self.active_model = None
+                self._ollama_healthy = False
             return ""
         finally:
             self._active_resp = None
@@ -627,8 +661,11 @@ class Brain:
                     "role": "assistant", "content": full_clean
                 })
                 if len(self.conversation_history) > self.max_history * 2:
-                    self.conversation_history = \
-                        self.conversation_history[-(self.max_history * 2):]
+                    self._summarize_oldest()
+                    # Safety trim if still over limit
+                    if len(self.conversation_history) > self.max_history * 2:
+                        self.conversation_history = \
+                            self.conversation_history[-(self.max_history * 2):]
             self.save_history()
 
         return full_response

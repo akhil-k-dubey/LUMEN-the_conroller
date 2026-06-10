@@ -332,7 +332,7 @@ class PersistentMemory:
     def get_context_summary(self) -> str:
         """
         Build a short context string for the LLM system prompt.
-        Includes known facts and recent session context.
+        Includes known facts, preferences, saved notes, and session context.
         """
         parts = []
         if self.user_facts:
@@ -345,6 +345,21 @@ class PersistentMemory:
                 f"{k}: {v}" for k, v in list(self.preferences.items())[:5]
             )
             parts.append(f"User preferences: {prefs}")
+
+        # Include notes saved via the 'remember' skill
+        try:
+            if os.path.exists(self.memory_file):
+                with open(self.memory_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                notes = data.get("notes", {})
+                if notes:
+                    note_items = "; ".join(
+                        f"{k}: {v}" for k, v in list(notes.items())[:10]
+                    )
+                    parts.append(f"Saved notes: {note_items}")
+        except (json.JSONDecodeError, IOError):
+            pass
+
         if self._loaded_history:
             parts.append(
                 f"Note: {len(self._loaded_history)} previous conversation turns "

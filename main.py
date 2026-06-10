@@ -240,6 +240,7 @@ def run(
     monitor_enabled: bool = True,
     agentic_enabled: bool = True,   # NEW: enable agentic task routing
     speculative_llm_enabled: bool = False, # NEW: speculative LLM prefill (disabled by default)
+    speaker_lock: bool = False, # NEW: voiceprint speaker verification
 ) -> None:
     # ── Signal handler for graceful Ctrl+C ────────────────────────────────
     _shutdown_requested = threading.Event()
@@ -349,6 +350,7 @@ def run(
         debug=debug_voice,
         whisper_model_size=whisper_model_size,
         stt_language=stt_language,
+        speaker_lock=speaker_lock,
     )
     voice.voice_mode = default_voice_mode
 
@@ -814,7 +816,14 @@ def _handle_brain_response(
         full_response = _state["full_response"]
         skill_results = _state["skill_results"]
 
-        # ── Action tag validation retry ────────────────────────────────────
+        # ── Fallback for empty LLM response (Ollama down/timeout) ──────────
+        was_interrupted_early = voice._barge_in_speech_pending
+        if not full_response and not skill_results and not was_interrupted_early:
+            print("[WARN] LLM returned empty response -- Ollama may be down or model unavailable")
+            voice.speak("I had trouble reaching my brain. Try again in a moment, sir.")
+            break
+
+        # ── Action tag validation retry ────────────────────────────────────────
         # If LLM emitted [ACTION but nothing executed (malformed tag),
         # do ONE corrective retry with a format reminder.
         # Only retry if no sentences were spoken — otherwise user already
@@ -1054,7 +1063,8 @@ if __name__ == "__main__":
     parser.add_argument("--no-monitor",   action="store_true",               help="Disable ProactiveMonitor.")
     parser.add_argument("--no-agentic",   action="store_true",               help="Disable agentic loop.")
     parser.add_argument("--speculative-llm", action="store_true",            help="Enable speculative LLM background prefill.")
-    parser.set_defaults(voice=True, speculative_llm=False)
+    parser.add_argument("--speaker-lock",    action="store_true",            help="Enable voiceprint speaker verification (reject non-owner input).")
+    parser.set_defaults(voice=True, speculative_llm=False, speaker_lock=False)
 
     args = parser.parse_args(sys.argv[1:])
 
@@ -1076,4 +1086,5 @@ if __name__ == "__main__":
         monitor_enabled=not args.no_monitor,
         agentic_enabled=not args.no_agentic,
         speculative_llm_enabled=args.speculative_llm,
+        speaker_lock=args.speaker_lock,
     )
